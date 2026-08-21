@@ -175,19 +175,40 @@ class TestFailureModes:
         dispatch("query_metric", GOOD)
         assert len(_CALLS) == before, "注册表缺失时仍然放行了 —— 不是 fail-closed"
 
-    def test_hook_exception_currently_fails_open(self, dispatch, gate, monkeypatch):
-        """hook 抛异常时调用会被放行。
+    def test_internal_error_is_converted_to_a_block(self, dispatch, gate, monkeypatch):
+        """判定过程内部出错时，插件自己兜成拦截。
 
-        这是 Hermes 的既有行为：model_tools 里 pre_tool_call 的派发包在
-        ``except Exception`` 里，只记 debug 日志然后继续执行。也就是说
-        **门禁插件自己崩了，门禁就静默消失**。
+        这是 bi-gate 的兜底：Hermes 侧对 hook 异常是 fail-open（见下一条），
+        所以异常绝不能逃出 ``_on_pre_tool_call``。这里让判定的核心函数抛异常，
+        验证调用仍然被拦下、且理由说明是门禁故障而非调用有问题。
+        """
 
-        这条测试把该行为钉住。如果哪天上游改成 fail-closed，它会变红，
-        那时应当把断言反过来 —— 而不是默默接受。
+        def _boom(*_a, **_kw):
+            raise RuntimeError("evaluate exploded")
+
+        monkeypatch.setattr(gate, "evaluate", _boom)
+        before = len(_CALLS)
+        result = dispatch("query_metric", GOOD)  # 本身完全合法
+        assert len(_CALLS) == before, "判定内部出错时放行了 —— 兜底没生效"
+        assert "门禁故障" in str(result), "拒绝理由要说清是门禁坏了，不是调用有问题"
+
+    def test_upstream_fails_open_when_the_whole_hook_raises(self, dispatch, gate, monkeypatch):
+        """整个 hook 被替换成抛异常的函数时，Hermes 会放行。
+
+        这条不是 bi-gate 的行为，是 **Hermes 的既有行为**：``model_tools.py``
+        里对 ``_dispatch_pre_tool_call_hooks`` 的调用包在 ``except Exception``
+        中，只记 debug 日志然后继续执行。
+
+        上面那条兜底能挡住"判定逻辑内部出错"，但挡不住"整个 hook 函数本身
+        坏掉"（比如插件加载出错、签名不匹配）。所以插件内部兜底之外，仍然
+        需要一条存活探针：定期发一个必然被拦的调用，拦不住就告警。
+
+        这条测试把上游行为钉住 —— 若哪天上游改成 fail-closed，它会变红，
+        届时应更新断言而不是默默接受。
         """
 
         def _boom(**_kwargs):
-            raise RuntimeError("gate exploded")
+            raise RuntimeError("hook itself exploded")
 
         monkeypatch.setattr(gate, "_on_pre_tool_call", _boom)
         before = len(_CALLS)

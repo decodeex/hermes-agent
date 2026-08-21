@@ -24,6 +24,9 @@ REJECT_UNKNOWN_METRIC = "rejected_unknown_metric"
 REJECT_BAD_PARAM = "rejected_bad_param"
 REJECT_NO_TIME_WINDOW = "rejected_no_time_window"
 REJECT_SCAN = "rejected_scan"
+#: 门禁自身出错。单列一类是为了运维能分开看：这类的量上升说明门禁坏了，
+#: 而不是调用方在乱调。它和其它拒因混在一起统计会互相淹没。
+REJECT_GATE_ERROR = "rejected_gate_error"
 PASSED = "passed"
 
 #: 拦截来源。必须出现在给模型看的拒绝理由里——否则模型会自己编一个归因。

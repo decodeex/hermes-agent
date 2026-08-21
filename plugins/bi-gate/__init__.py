@@ -31,7 +31,9 @@ import os
 from typing import Any, Dict, Mapping, Optional
 
 from .rules import (
+    GATE_SOURCE,
     PASSED,
+    REJECT_GATE_ERROR,
     MetricRegistry,
     MetricSpec,
     Verdict,
@@ -143,25 +145,68 @@ def _on_pre_tool_call(
     """在 query_metric 派发前判定；不通过则返回 block。
 
     返回 ``None`` 表示放行（其它工具一律不管）。
+
+    整个函数体包在兜底里：**任何未预料的异常都转成拦截，而不是让它抛出去**。
+    因为 Hermes 侧对 pre_tool_call 的调用包在 ``except Exception`` 中且只记
+    debug 日志（见 ``model_tools.py`` 里 ``_dispatch_pre_tool_call_hooks``
+    的调用处），异常逃出去就等于门禁静默消失 —— 没人看得见，调用照常放行。
+    这个失败方向对资金/口径类系统是不可接受的，所以在插件内部就把它扭回来。
     """
     if tool_name != GATED_TOOL:
         return None
-    if not isinstance(args, Mapping):
-        args = {}
 
-    # EXPLAIN 预估行数由执行层在派发前填进来；当前阶段还没接，先传 None
-    # （check_scan_budget 会放行并留给执行层记录）。
-    verdict = evaluate(args, _registry_now(), estimated_rows=None)
-    _audit(
-        verdict,
-        args,
-        session_id=context.get("session_id"),
-        task_id=context.get("task_id"),
-        tool_call_id=context.get("tool_call_id"),
-    )
-    if not verdict.blocked:
-        return None
-    return {"action": "block", "message": verdict.reason or "BI 门禁拦截。"}
+    try:
+        if not isinstance(args, Mapping):
+            args = {}
+
+        # EXPLAIN 预估行数由执行层在派发前填进来；当前阶段还没接，先传 None
+        # （check_scan_budget 会放行并留给执行层记录）。
+        verdict = evaluate(args, _registry_now(), estimated_rows=None)
+        _audit(
+            verdict,
+            args,
+            session_id=context.get("session_id"),
+            task_id=context.get("task_id"),
+            tool_call_id=context.get("tool_call_id"),
+        )
+        if not verdict.blocked:
+            return None
+        return {"action": "block", "message": verdict.reason or "BI 门禁拦截。"}
+    except Exception:
+        return _gate_error_block(args, context)
+
+
+def _gate_error_block(args: Any, context: Mapping[str, Any]) -> Dict[str, str]:
+    """门禁自身出错时的兜底返回：拦截。
+
+    这里不再抛任何异常 —— 兜底自己崩掉就等于没兜。日志与审计都各自吞掉自己的
+    失败，最后无论如何都会返回一个 block。
+    """
+    try:
+        logger.exception("bi-gate: 判定过程异常，按拦截处理（args=%r）", args)
+    except Exception:  # pragma: no cover - 日志坏掉不能影响拦截
+        pass
+    try:
+        _audit(
+            Verdict(
+                code=REJECT_GATE_ERROR,
+                reason="门禁自身异常",
+                detail={"args": repr(args)[:500]},
+            ),
+            args if isinstance(args, Mapping) else {},
+            session_id=context.get("session_id"),
+            task_id=context.get("task_id"),
+            tool_call_id=context.get("tool_call_id"),
+        )
+    except Exception:  # pragma: no cover - 审计坏掉不能影响拦截
+        pass
+    return {
+        "action": "block",
+        "message": (
+            f"{GATE_SOURCE}：门禁在判定这次调用时自身出错，按拦截处理。"
+            "这不是你的调用有问题，是门禁故障 —— 请联系值班，不要绕过。"
+        ),
+    }
 
 
 def _on_post_tool_call(
