@@ -1,0 +1,7 @@
+name: bi-gate
+version: "0.1.0"
+description: "系统 B 的门禁：在 query_metric 派发前做确定性校验（指标是否注册、参数是否合法、时间窗是否必填、扫描量是否超限），不通过即拦截并落一条审计。ACL 不在此层强制——行列级权限必须由数据层账号保证，本插件只做冗余提示。"
+author: "BIFU 技术研发中心"
+hooks:
+  - pre_tool_call
+  - post_tool_call
